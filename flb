@@ -3,6 +3,8 @@
 use Data::Dumper;
 use Term::ANSIColor qw(:constants);
 use Cwd 'abs_path';
+use LWP::Simple;
+use JSON;
 
 die "need arguments" unless ~~@ARGV;
 
@@ -21,6 +23,10 @@ if(-e $DOTFILE){
 		s/^~/$ENV{"HOME"}/e;
 		if(/^(https:|ssh:|\w+\@)/i){
 			handle_git_repository($_);
+		}elsif(/^github:(.+)$/){
+			handle_github($1);
+		}elsif(/^bitbucket:(.+):(.+)$/){
+			handle_bitbucket($1, $2);
 		}elsif(-e $_){
 			push @paths, $_;
 		}
@@ -29,6 +35,65 @@ if(-e $DOTFILE){
 }else{
 	system("cp $program_dir/flashback_paths.template $DOTFILE");
 	print STDERR "Append repository paths into $DOTFILE\n";
+}
+
+sub handle_bitbucket{
+	my $user = shift;
+	my $password = shift;
+	my $cache_dir = $ENV{"HOME"}."/.flashback/_bitbucket/_".$user;
+	unless(-e $cache_dir){
+		print STDERR "Create cache dir for bitbucket user: $user\n";
+		system("mkdir -p $cache_dir");
+		my @repositories = ();
+		my $url = "https://api.bitbucket.org/2.0/repositories/$user";
+ONE_PAGE:
+		print STDERR "$url\n";
+		my $cmd = "curl -u '$user:$password' -s $url";
+		#print STDERR $cmd."\n";
+		my $result = from_json(`$cmd`);
+		push @repositories, @{$result->{'values'}};
+		if($result->{"next"}){
+			$url = $result->{"next"};
+			goto ONE_PAGE;
+		}
+		for my $one_repo (@repositories){
+			my $clone_url = $one_repo->{"links"}->{"clone"}->[1]->{"href"};
+			my $name = $one_repo->{"name"};
+			my $local_path = $cache_dir."/".$name;
+			print STDERR "Clone: $clone_url\n";
+			system("git clone $clone_url $local_path");
+		}
+	}
+	handle_sub_dir($cache_dir);
+}
+
+sub handle_github{
+	my $user = shift;
+	my $cache_dir = $ENV{"HOME"}."/.flashback/_github/_".$user;
+	unless(-e $cache_dir){
+		print STDERR "Create cache dir for github user: $user\n";
+		system("mkdir -p $cache_dir");
+		my $url = "https://api.github.com/users/$user/repos";
+		print STDERR "$url\n";
+		my $repositories = from_json(`curl -s $url`);
+		for my $one_repo (@$repositories){
+			my $clone_url = $one_repo->{"clone_url"};
+			my $name = $one_repo->{"name"};
+			my $local_path = $cache_dir."/".$name;
+			print STDERR "Clone: $clone_url\n";
+			system("git clone $clone_url $local_path");
+		}
+	}
+	handle_sub_dir($cache_dir);
+}
+
+sub handle_sub_dir{
+	my $parent_dir = shift;
+	chdir $parent_dir;
+	my @folders = <*>;
+	for my $one_folder (@folders){
+		push @paths, $parent_dir."/".$one_folder;
+	}
 }
 
 sub handle_git_repository{
