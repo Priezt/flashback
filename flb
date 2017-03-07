@@ -1,0 +1,70 @@
+#!/usr/bin/env perl
+
+use Data::Dumper;
+use Term::ANSIColor qw(:constants);
+
+die "need arguments" unless ~~@ARGV;
+
+@paths = ();
+
+$DOTFILE = $ENV{"HOME"}."/.flashback_paths";
+if(-e $DOTFILE){
+	open F, "<", $DOTFILE;
+	while(<F>){
+		chomp;
+		next unless /./;
+		next if /^\#/;
+		s/^~/$ENV{"HOME"}/e;
+		if(/^(https:|ssh:|\w+\@)/i){
+			handle_git_repository($_);
+		}elsif(-e $_){
+			push @paths, $_;
+		}
+	}
+	close F;
+}else{
+	system("touch $DOTFILE");
+	print STDERR "Append repository paths into $DOTFILE\n";
+}
+
+sub handle_git_repository{
+	my $git_remote_address = shift;
+	my $cache_dir = $ENV{"HOME"}."/.flashback";
+	unless(-e $cache_dir){
+		print STDERR "Create .flashback dir\n";
+		mkdir $cache_dir;
+	}
+	my $local_path = $git_remote_address;
+	$local_path =~s /.*\///;
+	$local_path =~s /\.git$//;
+	$local_path = $cache_dir."/".$local_path;
+	unless(-e $local_path){
+		print STDERR "Clone: $git_remote_address\n";
+		system("git clone $git_remote_address $local_path");
+	}
+	push @paths, $local_path;
+}
+
+$ack_exe_path = `which ack ack-grep | head -1`;
+chomp($ack_exe_path);
+unless($ack_exe_path =~ /\//){
+	die "This script need `ack` to work";
+}
+
+#print Dumper(\@paths);
+
+for my $one_path (@paths){
+	my $command = "$ack_exe_path --group --color ".join(' ', map {
+		s/'/'"'"'/g;
+		"'".$_."'";
+	} @ARGV);
+	#print $command."\n";
+	chdir $one_path;
+	my $output = `$command`;
+	if(length($output) > 0){
+		print RED, "$one_path\n", RESET;
+		print $output;
+	}
+}
+
+
