@@ -2,8 +2,12 @@
 
 use Data::Dumper;
 use Term::ANSIColor qw(:constants);
+use Cwd 'abs_path';
 
 die "need arguments" unless ~~@ARGV;
+
+$program_dir = abs_path($0);
+$program_dir =~s /\/[^\/]*$//;
 
 @paths = ();
 
@@ -23,7 +27,7 @@ if(-e $DOTFILE){
 	}
 	close F;
 }else{
-	system("touch $DOTFILE");
+	system("cp $program_dir/flashback_paths.template $DOTFILE");
 	print STDERR "Append repository paths into $DOTFILE\n";
 }
 
