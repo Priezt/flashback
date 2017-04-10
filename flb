@@ -6,62 +6,80 @@ use Cwd 'abs_path';
 use LWP::Simple;
 use JSON;
 
-die "need arguments" unless ~~@ARGV;
+unless(~~@ARGV){
+	print "./flb <search criteria, same as ack-grep>\n";
+	print "./flb update\n";
+	print "./flb clonenew\n";
+	exit;
+}
 
-$program_dir = abs_path($0);
+our $program_dir = abs_path($0);
 $program_dir =~s /\/[^\/]*$//;
 
-@paths = ();
+our $force_update = 0;
+our $clone_new = 0;
 
-$DOTFILE = $ENV{"HOME"}."/.flashback_paths";
-if(-e $DOTFILE){
-	open F, "<", $DOTFILE;
-	while(<F>){
-		chomp;
-		next unless /./;
-		next if /^\#/;
-		s/^~/$ENV{"HOME"}/e;
-		if(/^(https:|ssh:|\w+\@)/i){
-			handle_git_repository($_);
-		}elsif(/^github:(.+)$/){
-			handle_github($1);
-		}elsif(/^bitbucket:(.+):(.+)$/){
-			handle_bitbucket($1, $2);
-		}elsif(-e $_){
-			push @paths, $_;
+our @paths = ();
+
+sub load_path{
+	$DOTFILE = $ENV{"HOME"}."/.flashback_paths";
+	if(-e $DOTFILE){
+		open F, "<", $DOTFILE;
+		while(<F>){
+			chomp;
+			next unless /./;
+			next if /^\#/;
+			s/^~/$ENV{"HOME"}/e;
+			if(/^(https:|ssh:|\w+\@)/i){
+				handle_git_repository($_);
+			}elsif(/^github:(.+)$/){
+				handle_github($1);
+			}elsif(/^bitbucket:(.+):(.+)$/){
+				handle_bitbucket($1, $2);
+			}elsif(-e $_){
+				push @paths, $_;
+			}
 		}
+		close F;
+	}else{
+		system("cp $program_dir/flashback_paths.template $DOTFILE");
+		print STDERR "Append repository paths into $DOTFILE\n";
 	}
-	close F;
-}else{
-	system("cp $program_dir/flashback_paths.template $DOTFILE");
-	print STDERR "Append repository paths into $DOTFILE\n";
+}
+
+sub get_bitbucket_repos{
+	my $user = shift;
+	my $password = shift;
+	my @repositories = ();
+	my $url = "https://api.bitbucket.org/2.0/repositories/$user";
+ONE_PAGE:
+	print STDERR "$url\n";
+	my $cmd = "curl -u '$user:$password' -s $url";
+	#print STDERR $cmd."\n";
+	my $result = from_json(`$cmd`);
+	push @repositories, @{$result->{'values'}};
+	if($result->{"next"}){
+		$url = $result->{"next"};
+		goto ONE_PAGE;
+	}
+	return @repositories;
 }
 
 sub handle_bitbucket{
 	my $user = shift;
 	my $password = shift;
 	my $cache_dir = $ENV{"HOME"}."/.flashback/_bitbucket/_".$user;
-	unless(-e $cache_dir){
-		print STDERR "Create cache dir for bitbucket user: $user\n";
-		system("mkdir -p $cache_dir");
-		my @repositories = ();
-		my $url = "https://api.bitbucket.org/2.0/repositories/$user";
-ONE_PAGE:
-		print STDERR "$url\n";
-		my $cmd = "curl -u '$user:$password' -s $url";
-		#print STDERR $cmd."\n";
-		my $result = from_json(`$cmd`);
-		push @repositories, @{$result->{'values'}};
-		if($result->{"next"}){
-			$url = $result->{"next"};
-			goto ONE_PAGE;
+	if(not -e $cache_dir or $force_update){
+		unless(-e $cache_dir){
+			print STDERR "Create cache dir for bitbucket user: $user\n";
+			system("mkdir -p $cache_dir");
 		}
+		my @repositories = get_bitbucket_repos($user, $password);
 		for my $one_repo (@repositories){
 			my $clone_url = $one_repo->{"links"}->{"clone"}->[1]->{"href"};
 			my $name = $one_repo->{"name"};
 			my $local_path = $cache_dir."/".$name;
-			print STDERR "Clone: $clone_url\n";
-			system("git clone $clone_url $local_path");
+			clone_or_pull_repository($local_path, $clone_url);
 		}
 	}
 	handle_sub_dir($cache_dir);
@@ -70,9 +88,11 @@ ONE_PAGE:
 sub handle_github{
 	my $user = shift;
 	my $cache_dir = $ENV{"HOME"}."/.flashback/_github/_".$user;
-	unless(-e $cache_dir){
-		print STDERR "Create cache dir for github user: $user\n";
-		system("mkdir -p $cache_dir");
+	if(not -e $cache_dir or $force_update){
+		unless(-e $cache_dir){
+			print STDERR "Create cache dir for github user: $user\n";
+			system("mkdir -p $cache_dir");
+		}
 		my $url = "https://api.github.com/users/$user/repos";
 		print STDERR "$url\n";
 		my $repositories = from_json(`curl -s $url`);
@@ -80,8 +100,7 @@ sub handle_github{
 			my $clone_url = $one_repo->{"clone_url"};
 			my $name = $one_repo->{"name"};
 			my $local_path = $cache_dir."/".$name;
-			print STDERR "Clone: $clone_url\n";
-			system("git clone $clone_url $local_path");
+			clone_or_pull_repository($local_path, $clone_url);
 		}
 	}
 	handle_sub_dir($cache_dir);
@@ -99,41 +118,65 @@ sub handle_sub_dir{
 sub handle_git_repository{
 	my $git_remote_address = shift;
 	my $cache_dir = $ENV{"HOME"}."/.flashback";
-	unless(-e $cache_dir){
-		print STDERR "Create .flashback dir\n";
-		mkdir $cache_dir;
-	}
-	my $local_path = $git_remote_address;
-	$local_path =~s /.*\///;
-	$local_path =~s /\.git$//;
-	$local_path = $cache_dir."/".$local_path;
-	unless(-e $local_path){
-		print STDERR "Clone: $git_remote_address\n";
-		system("git clone $git_remote_address $local_path");
+	if(not -e $cache_dir or $force_update){
+		unless(-e $cache_dir){
+			print STDERR "Create .flashback dir\n";
+			mkdir $cache_dir;
+		}
+		my $local_path = $git_remote_address;
+		$local_path =~s /.*\///;
+		$local_path =~s /\.git$//;
+		$local_path = $cache_dir."/".$local_path;
+		clone_or_pull_repository($local_path, $git_remote_address);
 	}
 	push @paths, $local_path;
 }
 
-$ack_exe_path = `which ack ack-grep | head -1`;
-chomp($ack_exe_path);
-unless($ack_exe_path =~ /\//){
-	die "This script need `ack` to work";
-}
-
-#print Dumper(\@paths);
-
-for my $one_path (@paths){
-	my $command = "$ack_exe_path --group --color ".join(' ', map {
-		s/'/'"'"'/g;
-		"'".$_."'";
-	} @ARGV);
-	#print $command."\n";
-	chdir $one_path;
-	my $output = `$command`;
-	if(length($output) > 0){
-		print RED, "$one_path\n", RESET;
-		print $output;
+sub clone_or_pull_repository{
+	my $local_path = shift;
+	my $remote_address = shift;
+	unless(-e $local_path){
+		print STDERR "Clone: $remote_address\n";
+		system("git clone $remote_address $local_path");
+	}else{
+		unless($clone_new){
+			print STDERR "Pull: $remote_address\n";
+			chdir($local_path);
+			system("git pull");
+		}
 	}
 }
 
+sub do_search{
+	$ack_exe_path = `which ack ack-grep | head -1`;
+	chomp($ack_exe_path);
+	unless($ack_exe_path =~ /\//){
+		die "This script need `ack` to work";
+	}
+	for my $one_path (@paths){
+		my $command = "$ack_exe_path --group --color ".join(' ', map {
+			s/'/'"'"'/g;
+			"'".$_."'";
+		} @ARGV);
+		#print $command."\n";
+		chdir $one_path;
+		my $output = `$command`;
+		if(length($output) > 0){
+			print RED, "$one_path\n", RESET;
+			print $output;
+		}
+	}
+}
+
+if(~~@ARGV == 1 and $ARGV[0] eq 'update'){
+	$force_update = 1;
+	load_path();
+}elsif(~~@ARGV == 1 and $ARGV[0] eq 'clonenew'){
+	$force_update = 1;
+	$clone_new = 1;
+	load_path();
+}else{
+	load_path();
+	do_search();
+}
 
